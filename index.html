@@ -180,6 +180,25 @@
   .empty { color: var(--gray); padding: 18px; text-align: center; }
   .required { color: var(--red); }
 
+  /* Sign-in screen */
+  #loginScreen {
+    position: fixed; inset: 0; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10;
+  }
+  #loginScreen[hidden] { display: none; }
+  .login-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; width: 100%; max-width: 360px; box-shadow: 0 4px 16px rgba(16,24,40,.08);
+  }
+  .login-card h1 { margin: 0 0 4px; font-size: 19px; color: var(--brand); }
+  .login-card p { margin: 0 0 14px; color: var(--gray); font-size: 13px; }
+  .login-card button { width: 100%; margin-top: 12px; }
+  .login-error { color: var(--red); font-weight: 600; font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .role-pill {
+    background: rgba(255,255,255,.14); border-radius: 999px; padding: 3px 10px;
+    color: #fff; font-weight: 600;
+  }
+
   @media (max-width: 560px) {
     .form-grid { grid-template-columns: 1fr; }
     header h1 { font-size: 16px; }
@@ -187,11 +206,24 @@
 </style>
 </head>
 <body>
+<div id="loginScreen">
+  <form class="login-card" id="loginForm">
+    <h1>🚫 Do Not Rent List</h1>
+    <p>Enter your passcode to continue.</p>
+    <label for="passcode">Passcode</label>
+    <input type="password" id="passcode" autocomplete="current-password" required>
+    <button type="submit" class="btn-primary" id="loginBtn">Sign in</button>
+    <div class="login-error" id="loginError"></div>
+  </form>
+</div>
+
 <header>
   <h1>🚫 Do Not Rent List</h1>
   <div class="status">
     <span id="lastUpdated">Loading…</span>
+    <span class="role-pill" id="roleLabel"></span>
     <button class="btn-secondary" id="refreshBtn">↻ Refresh</button>
+    <button class="btn-secondary" id="signOutBtn">Sign out</button>
   </div>
 </header>
 
@@ -201,7 +233,7 @@
        It looks like: https://script.google.com/macros/s/AKfyc.../exec
        ============================================================ -->
   <script>
-    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyXCTjZI3ran992Ob6ImxminSO_6lMOmx2ujMGUcSqNhq-E3cxlQ3LNuBkBSz2dDAwxjA/exec";
+    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwOjyL-BTD6XlNg9dOyJB9OtWPb9o3yFX95aiVY4ulDYK2QbyyQN7bWK5qKrOVydWAZ/exec";
   </script>
 
   <!-- TABS -->
@@ -272,7 +304,7 @@
           <th>Notes</th>
           <th>Added</th>
           <th>By</th>
-          <th></th>
+          <th class="mgr-only"></th>
         </tr>
       </thead>
       <tbody id="listBody">
@@ -286,11 +318,11 @@
 <script>
   // ---- In-memory copy of the list (fetched fresh on every load/refresh) ----
   let ROWS = [];
+  let CODE = "";   // passcode for this PC (remembered in this browser)
+  let ROLE = "";   // "staff" or "manager" — decided by the server
 
   const $ = (id) => document.getElementById(id);
 
-  // Normalize a name for forgiving matching:
-  // lowercase, collapse extra whitespace, trim.
   function norm(s) {
     return (s || "").toString().toLowerCase().replace(/\s+/g, " ").trim();
   }
@@ -305,41 +337,107 @@
     });
   }
 
-  // Escape text before inserting into HTML.
   function esc(s) {
     return (s || "").toString()
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // ---- Remember the passcode on this PC (safe if storage is blocked) ----
+  function saveCode(code) { try { localStorage.setItem("dnr_code", code); } catch (e) {} }
+  function loadCode() { try { return localStorage.getItem("dnr_code") || ""; } catch (e) { return ""; } }
+  function clearCode() { try { localStorage.removeItem("dnr_code"); } catch (e) {} }
+
+  // ---- One helper for every API call (all POST, passcode in the body) ----
+  async function api(payload) {
+    const res = await fetch(WEB_APP_URL, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(Object.assign({ code: CODE }, payload))
+    });
+    const data = await res.json();
+    if (data.auth === false) {
+      // Passcode was changed or is wrong — send this PC back to sign-in.
+      signOut("Passcode no longer valid. Please sign in again.");
+      throw new Error("Not signed in");
+    }
+    if (!data.ok) throw new Error(data.error || "Server error");
+    return data;
+  }
+
+  // ---- Sign in / sign out ----
+  function applyRole(role) {
+    ROLE = role;
+    $("roleLabel").textContent = role === "manager" ? "Manager" : "Front desk";
+    document.querySelectorAll(".mgr-only").forEach(function (el) {
+      el.style.display = role === "manager" ? "" : "none";
+    });
+  }
+
+  function showLogin(msg) {
+    $("loginScreen").hidden = false;
+    $("loginError").textContent = msg || "";
+    $("passcode").value = "";
+    $("passcode").focus();
+  }
+
+  function signOut(msg) {
+    CODE = ""; ROLE = ""; ROWS = [];
+    clearCode();
+    $("listBody").innerHTML = "";
+    $("resultBanner").className = "result-banner";
+    $("searchBox").value = "";
+    showLogin(msg);
+  }
+
+  async function signIn(e) {
+    e.preventDefault();
+    const code = $("passcode").value.trim();
+    if (!code) return;
+    $("loginBtn").disabled = true;
+    $("loginError").textContent = "Checking…";
+    try {
+      CODE = code;
+      const data = await api({ action: "login" });
+      saveCode(code);
+      applyRole(data.role);
+      $("loginScreen").hidden = true;
+      $("loginError").textContent = "";
+      showTab("panel-search");
+      loadList();
+    } catch (err) {
+      CODE = "";
+      if (err.message !== "Not signed in") $("loginError").textContent = err.message;
+      else $("loginError").textContent = "Wrong passcode.";
+    } finally {
+      $("loginBtn").disabled = false;
+    }
   }
 
   // ---- Fetch the whole list from the API (no caching) ----
   async function loadList() {
-    if (WEB_APP_URL.indexOf("PASTE_YOUR_WEB_APP_URL") === 0) {
-      $("lastUpdated").textContent = "⚠ Web App URL not set in index.html";
-      $("listBody").innerHTML = '<tr><td colspan="6" class="empty">Set WEB_APP_URL in index.html to load data.</td></tr>';
-      return;
-    }
+    if (!CODE) return;
     $("lastUpdated").textContent = "Loading…";
     try {
-      // cache:no-store + a timestamp param guarantee a fresh fetch every time.
-      const url = WEB_APP_URL + "?action=list&t=" + Date.now();
-      const res = await fetch(url, { method: "GET", cache: "no-store" });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Server error");
+      const data = await api({ action: "list" });
+      applyRole(data.role);
       ROWS = data.rows || [];
       renderList();
-      runSearch(); // re-evaluate any active search against fresh data
+      runSearch();
       $("lastUpdated").textContent = "Last updated: " + fmtDate(new Date().toISOString());
     } catch (err) {
+      if (err.message === "Not signed in") return;
       $("lastUpdated").textContent = "⚠ Could not load list";
       $("listBody").innerHTML =
         '<tr><td colspan="6" class="empty">Error loading list: ' + esc(err.message) + '</td></tr>';
     }
   }
 
-  // ---- Render the full list table (newest first, already sorted by server) ----
+  // ---- Render the full list table ----
   function renderList() {
     const body = $("listBody");
+    const isMgr = ROLE === "manager";
     $("countLabel").textContent = ROWS.length ? ROWS.length + (ROWS.length === 1 ? " entry" : " entries") : "";
     $("tabCount").textContent = ROWS.length;
     if (!ROWS.length) {
@@ -354,7 +452,7 @@
         '<td>' + esc(r.notes) + '</td>' +
         '<td class="muted">' + esc(fmtDate(r.created_at)) + '</td>' +
         '<td class="muted">' + esc(r.added_by) + '</td>' +
-        '<td><button class="btn-danger" onclick="deleteRow(\'' + esc(r.id) + '\')">Delete</button></td>' +
+        (isMgr ? '<td><button class="btn-danger" data-id="' + esc(r.id) + '">Delete</button></td>' : '') +
       '</tr>';
     }).join("");
   }
@@ -368,7 +466,6 @@
       banner.innerHTML = "";
       return;
     }
-    // Match if every word typed appears somewhere in the full name.
     const words = q.split(" ");
     const matches = ROWS.filter(function (r) {
       const full = norm(r.first_name + " " + r.last_name);
@@ -395,33 +492,23 @@
     }
   }
 
-  // ---- Add a new entry ----
+  // ---- Add a new entry (front desk + manager) ----
   async function addEntry(e) {
     e.preventDefault();
     const reason = $("reason").value.trim();
     if (!reason) { alert("Reason is required."); return; }
 
-    const payload = {
-      action: "add",
-      first_name: $("firstName").value.trim(),
-      last_name: $("lastName").value.trim(),
-      reason: reason,
-      notes: $("notes").value.trim(),
-      added_by: $("addedBy").value.trim()
-    };
-
     $("addBtn").disabled = true;
     $("addConfirm").textContent = "Saving…";
     try {
-      // text/plain avoids a CORS preflight; Apps Script parses the JSON body.
-      const res = await fetch(WEB_APP_URL, {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify(payload)
+      await api({
+        action: "add",
+        first_name: $("firstName").value.trim(),
+        last_name: $("lastName").value.trim(),
+        reason: reason,
+        notes: $("notes").value.trim(),
+        added_by: $("addedBy").value.trim()
       });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Server error");
       $("addForm").reset();
       $("addConfirm").textContent = "✅ Added.";
       await loadList();
@@ -429,31 +516,28 @@
       setTimeout(function () { $("addConfirm").textContent = ""; }, 4000);
     } catch (err) {
       $("addConfirm").textContent = "";
-      alert("Could not add entry: " + err.message);
+      if (err.message !== "Not signed in") alert("Could not add entry: " + err.message);
     } finally {
       $("addBtn").disabled = false;
     }
   }
 
-  // ---- Delete an entry (with confirm) ----
+  // ---- Delete an entry (manager only — the server also enforces this) ----
   async function deleteRow(id) {
     const row = ROWS.find(function (r) { return r.id === id; });
     const label = row ? ((row.first_name + " " + row.last_name).trim() || "this entry") : "this entry";
     if (!confirm('Remove "' + label + '" from the Do Not Rent list?')) return;
     try {
-      const res = await fetch(WEB_APP_URL, {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "delete", id: id })
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Server error");
+      await api({ action: "delete", id: id });
       await loadList();
     } catch (err) {
-      alert("Could not delete: " + err.message);
+      if (err.message !== "Not signed in") alert("Could not delete: " + err.message);
     }
   }
+  $("listBody").addEventListener("click", function (e) {
+    const btn = e.target.closest("button[data-id]");
+    if (btn) deleteRow(btn.dataset.id);
+  });
 
   // ---- Tab switching ----
   function showTab(panelId) {
@@ -463,7 +547,6 @@
     document.querySelectorAll(".panel").forEach(function (p) {
       p.classList.toggle("active", p.id === panelId);
     });
-    // When Search opens, put the cursor straight in the search box.
     if (panelId === "panel-search") $("searchBox").focus();
     if (panelId === "panel-add") $("firstName").focus();
   }
@@ -472,12 +555,14 @@
   });
 
   // ---- Wire up events ----
+  $("loginForm").addEventListener("submit", signIn);
+  $("signOutBtn").addEventListener("click", function () { signOut(); });
   $("searchBox").addEventListener("input", runSearch);
   $("addForm").addEventListener("submit", addEntry);
   $("refreshBtn").addEventListener("click", loadList);
 
-  // Keyboard shortcut: press "/" from anywhere to jump back to Search.
   document.addEventListener("keydown", function (e) {
+    if (!CODE) return;
     if (e.key === "/" && document.activeElement.tagName !== "INPUT" &&
         document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault();
@@ -485,10 +570,16 @@
     }
   });
 
-  // Fetch fresh data on every page load, then focus the search box.
+  // ---- On load: use the remembered passcode, or show sign-in ----
   window.addEventListener("load", function () {
-    loadList();
-    $("searchBox").focus();
+    if (WEB_APP_URL.indexOf("PASTE_YOUR_WEB_APP_URL") === 0) {
+      showLogin("⚠ Web App URL not set in index.html");
+      return;
+    }
+    CODE = loadCode();
+    if (!CODE) { showLogin(); return; }
+    $("loginScreen").hidden = true;
+    loadList().then(function () { if (CODE) $("searchBox").focus(); });
   });
 </script>
 </body>
